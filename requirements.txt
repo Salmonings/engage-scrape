@@ -1,0 +1,6 @@
+playwright>=1.44
+beautifulsoup4>=4.12
+lxml>=5.2
+python-dotenv>=1.0
+requests>=2.31
+icalendar>=5.0

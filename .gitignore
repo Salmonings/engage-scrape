@@ -1,0 +1,24 @@
+# credentials & session
+.env
+session_state.json
+
+# scraped data (regenerate with main.py commands)
+engage.db
+export.json
+timetable.ics
+reports/
+discovery/
+
+# python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
