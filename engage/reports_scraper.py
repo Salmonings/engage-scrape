@@ -1,18 +1,19 @@
-"""Scrape assessment reports from MyReportComments.aspx.
+"""Assessment reports scraper — MyReportComments.aspx.
 
-Each reporting period's full rendered HTML is fetched via RenderSimpleSection
-and saved both to the DB (reports table) and to reports/<year>_<id>.html on
-disk so it can be opened in a browser.
+Public API
+----------
+fetch_reports_meta()         Live fetch period list (no HTML). Used by API server.
+fetch_report_detail(pid)     Live fetch one period's full HTML. Used by API server.
+scrape_reports()             Fetch all + save to DB + write HTML files. Used by main.py.
 """
 from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
-from pathlib import Path
 
 from bs4 import BeautifulSoup
 
-from . import config, store
+from . import client, config, store
 from .client import requests_session
 
 _BASE = config.BASE_URL
@@ -22,8 +23,8 @@ _RENDER_SVC = "/Services/PupilAssessmentServices.asmx/RenderSimpleSection"
 _REPORTS_DIR = config.ROOT / "reports"
 
 
-def _make_session():
-    s = requests_session()
+def _make_session(state: dict | None = None):
+    s = client.requests_session_from_state(state) if state else requests_session()
     s.headers.update({
         "X-Requested-With": "XMLHttpRequest",
         "Accept": "application/json, text/javascript, */*; q=0.01",
@@ -34,7 +35,6 @@ def _make_session():
 
 
 def _get_encrypted_pupil_id(s) -> str:
-    """Extract encryptedPupilID from hidden field ctl00_PageContent_hdnPupilID."""
     r = s.get(_BASE + "/VLE/MyReportComments.aspx")
     soup = BeautifulSoup(r.text, "html.parser")
     hid = soup.find(id="ctl00_PageContent_hdnPupilID")
@@ -49,8 +49,80 @@ def _post(s, endpoint: str, payload: dict):
         return {"_raw": r.text[:200], "_status": r.status_code}
 
 
+def _get_periods(s, enc_id: str) -> list[dict]:
+    r = _post(s, _PERIODS_SVC, {"encryptedPupilID": enc_id})
+    return json.loads(r["d"]) if "d" in r else []
+
+
+def _get_subjects(s, enc_id: str, pid: str, year: str) -> list[dict]:
+    r = _post(s, _SUBJECTS_SVC, {
+        "encryptedPupilId": enc_id,
+        "reportingPeriod": pid,
+        "academicYear": year,
+    })
+    return json.loads(r["d"]) if "d" in r else []
+
+
+def _render_html(s, enc_id: str, pid: str, year: str) -> str:
+    r = _post(s, _RENDER_SVC, {
+        "encryptedPupilID": enc_id,
+        "academicYear": year,
+        "reportingPeriodId": pid,
+        "subjectIds": "",
+        "sectionType": "PupilAssessments",
+    })
+    return r.get("d", "") or ""
+
+
+# ---------------------------------------------------------------------------
+# Public functions
+# ---------------------------------------------------------------------------
+
+def fetch_reports_meta(state: dict | None = None) -> list[dict]:
+    """Live fetch all reporting periods (metadata only, no HTML)."""
+    s = _make_session(state)
+    enc_id = _get_encrypted_pupil_id(s)
+    if not enc_id:
+        return []
+    periods = _get_periods(s, enc_id)
+    return [
+        {
+            "period_id": str(p["ReportingPeriodId"]),
+            "period_name": p.get("Name", ""),
+            "academic_year": str(p.get("AcademicYear", "")),
+            "is_locked": p.get("IsLocked", True),
+        }
+        for p in sorted(periods, key=lambda p: p.get("AcademicYear", 0), reverse=True)
+    ]
+
+
+def fetch_report_detail(period_id: str, state: dict | None = None) -> dict | None:
+    """Live fetch one period's full rendered HTML + subject count."""
+    s = _make_session(state)
+    enc_id = _get_encrypted_pupil_id(s)
+    if not enc_id:
+        return None
+    periods = _get_periods(s, enc_id)
+    period = next((p for p in periods if str(p["ReportingPeriodId"]) == period_id), None)
+    if not period:
+        return None
+    pid = str(period["ReportingPeriodId"])
+    year = str(period["AcademicYear"])
+    subjects = _get_subjects(s, enc_id, pid, year)
+    html = _render_html(s, enc_id, pid, year)
+    if not html or len(html) < 50:
+        return None
+    return {
+        "period_id": pid,
+        "period_name": period.get("Name", ""),
+        "academic_year": year,
+        "n_subjects": len(subjects),
+        "html": html,
+    }
+
+
 def scrape_reports(verbose: bool = True) -> int:
-    """Scrape all assessment reporting periods. Returns count of periods saved."""
+    """Fetch all reporting periods, save to DB and HTML files. Returns count saved."""
     s = _make_session()
     _REPORTS_DIR.mkdir(exist_ok=True)
 
@@ -63,12 +135,9 @@ def scrape_reports(verbose: bool = True) -> int:
 
     enc_id = _get_encrypted_pupil_id(s)
     if not enc_id:
-        raise RuntimeError("Could not find encryptedPupilID on MyReportComments.aspx — is the session valid?")
-    log(f"encryptedPupilID: {enc_id}")
+        raise RuntimeError("Could not find encryptedPupilID — is the session valid?")
 
-    # Get all reporting periods
-    periods_r = _post(s, _PERIODS_SVC, {"encryptedPupilID": enc_id})
-    periods = json.loads(periods_r["d"]) if "d" in periods_r else []
+    periods = _get_periods(s, enc_id)
     if not periods:
         log("No reporting periods found.")
         return 0
@@ -82,48 +151,23 @@ def scrape_reports(verbose: bool = True) -> int:
         pid = str(p["ReportingPeriodId"])
         year = str(p["AcademicYear"])
         name = p.get("Name", "")
-
-        # Get subjects to know the count
-        subj_r = _post(s, _SUBJECTS_SVC, {
-            "encryptedPupilId": enc_id,
-            "reportingPeriod": pid,
-            "academicYear": year,
-        })
-        subjects = json.loads(subj_r["d"]) if "d" in subj_r else []
-
-        # Render all subjects for this period in one call
-        render_r = _post(s, _RENDER_SVC, {
-            "encryptedPupilID": enc_id,
-            "academicYear": year,
-            "reportingPeriodId": pid,
-            "subjectIds": "",
-            "sectionType": "PupilAssessments",
-        })
-        html = render_r.get("d", "") or ""
+        subjects = _get_subjects(s, enc_id, pid, year)
+        html = _render_html(s, enc_id, pid, year)
 
         if not html or len(html) < 50:
-            log(f"  [{pid}] {name!r}: empty/error response, skipping")
+            log(f"  [{pid}] {name!r}: empty/error, skipping")
             continue
 
-        # Save HTML file
         safe_name = name.replace("/", "-").replace(" ", "_").replace("(", "").replace(")", "")
-        filename = f"{year}_{pid}_{safe_name[:60]}.html"
-        html_path = _REPORTS_DIR / filename
-        # Wrap in a minimal HTML skeleton so the file is self-contained
-        full_html = f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<title>{name}</title>
-<style>body{{font-family:Arial,sans-serif;margin:2em;}} table{{border-collapse:collapse;width:100%}}
-th,td{{border:1px solid #ccc;padding:6px 10px;text-align:left}}
-th{{background:#f0f0f0}} tr:nth-child(even){{background:#fafafa}}</style>
-</head>
-<body>
-<h2>{name} ({year}/{int(year)+1})</h2>
-{html}
-</body>
-</html>"""
+        html_path = _REPORTS_DIR / f"{year}_{pid}_{safe_name[:60]}.html"
+        full_html = (
+            f'<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title>{name}</title>'
+            f"<style>body{{font-family:Arial,sans-serif;margin:2em}}"
+            f"table{{border-collapse:collapse;width:100%}}"
+            f"th,td{{border:1px solid #ccc;padding:6px 10px;text-align:left}}"
+            f"th{{background:#f0f0f0}}tr:nth-child(even){{background:#fafafa}}</style></head>"
+            f"<body><h2>{name} ({year}/{int(year)+1})</h2>{html}</body></html>"
+        )
         html_path.write_text(full_html, encoding="utf-8")
 
         rows.append({
@@ -134,8 +178,7 @@ th{{background:#f0f0f0}} tr:nth-child(even){{background:#fafafa}}</style>
             "html": html,
             "scraped_at": datetime.now(timezone.utc).isoformat(),
         })
-        log(f"  [{pid}] {name!r}: {len(subjects)} subjects, {len(html)} chars -> {html_path.name}")
+        log(f"  [{pid}] {name!r}: {len(subjects)} subjects -> {html_path.name}")
 
     store.save_reports(rows)
-    log(f"\nSaved {len(rows)} report(s) to DB + HTML files in {_REPORTS_DIR}")
     return len(rows)

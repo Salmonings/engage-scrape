@@ -67,6 +67,76 @@ def _do_login(page: Page) -> None:
         )
 
 
+def login_with_credentials(username: str, password: str, security_code: str = "") -> dict:
+    """Log in to the Engage portal with explicit credentials.
+
+    Returns the Playwright storage state as a dict (cookies etc.).
+    Raises ValueError if login fails.
+    Does NOT touch session_state.json.
+    """
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context()
+        page = context.new_page()
+        page.goto(config.LOGIN_URL, wait_until="load")
+        try:
+            page.wait_for_load_state("networkidle", timeout=15_000)
+        except Exception:
+            pass
+        page.fill(SEL_USER, username)
+        page.fill(SEL_PASS, password)
+        if security_code:
+            try:
+                page.fill(SEL_MFA, security_code)
+            except Exception:
+                pass
+        try:
+            page.check(SEL_REMEMBER)
+        except Exception:
+            pass
+        page.click(SEL_SUBMIT)
+        try:
+            page.wait_for_url(lambda u: "login.aspx" not in u.lower(), timeout=30_000)
+        except Exception:
+            pass
+        if _on_login_page(page):
+            browser.close()
+            raise ValueError("Login failed — check Engage username and password")
+        state = context.storage_state()
+        browser.close()
+        return state
+
+
+@contextmanager
+def session_page_from_state(state: dict) -> Iterator[Page]:
+    """Open a Playwright page using a pre-captured session state dict.
+
+    Raises RuntimeError if the session has expired (redirected to login.aspx).
+    Callers must handle this and return a 401 to the API client.
+    """
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=not config.HEADED)
+        context = browser.new_context(storage_state=state)
+        page = context.new_page()
+        page.goto(config.BASE_URL + "/vle/default.aspx", wait_until="networkidle")
+        if _on_login_page(page):
+            browser.close()
+            raise RuntimeError("Session expired — call /auth/login again")
+        try:
+            yield page
+        finally:
+            browser.close()
+
+
+def requests_session_from_state(state: dict) -> requests.Session:
+    """Build a requests.Session from a Playwright storage state dict."""
+    s = requests.Session()
+    s.headers["User-Agent"] = "Mozilla/5.0"
+    for c in state.get("cookies", []):
+        s.cookies.set(c["name"], c["value"], domain=c.get("domain"), path=c.get("path", "/"))
+    return s
+
+
 def login_and_save() -> None:
     if not config.USERNAME or not config.PASSWORD:
         raise SystemExit("Set ENGAGE_USERNAME and ENGAGE_PASSWORD in .env")

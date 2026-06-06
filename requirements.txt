@@ -1,6 +1,15 @@
+# scraper
 playwright>=1.44
 beautifulsoup4>=4.12
 lxml>=5.2
 python-dotenv>=1.0
 requests>=2.31
 icalendar>=5.0
+
+# api server
+fastapi>=0.111
+uvicorn[standard]>=0.29
+
+# discord bot
+discord.py>=2.3
+httpx>=0.27

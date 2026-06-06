@@ -11,12 +11,14 @@
     python main.py scrape_hw 2024     # scrape a specific year
     python main.py scrape_notices     # scrape all notices from the mailbox
     python main.py scrape_reports     # scrape all assessment report periods -> DB + HTML files
+    python main.py serve              # start the API server (localhost:8000)
     python main.py export             # write export.json
     python main.py ics                # write timetable.ics (Google/Apple Calendar)
     python main.py show               # print what's in the DB
 """
 from __future__ import annotations
 
+import os
 import sys
 
 from engage import client, config, discover, parsers, store, tools
@@ -106,6 +108,13 @@ def cmd_scrape_reports() -> None:
     print(f"\nDone. {n} report period(s) saved.")
 
 
+def cmd_serve() -> None:
+    """Start the FastAPI server. Runs on 0.0.0.0:8000 by default."""
+    import uvicorn
+    port = int(os.getenv("PORT", "8000"))
+    uvicorn.run("engage.api:app", host="0.0.0.0", port=port, reload=False)
+
+
 def cmd_export() -> None:
     store.export_json()
 
@@ -146,6 +155,7 @@ COMMANDS = {
     "login": cmd_login, "probe": cmd_probe, "discover": cmd_discover,
     "scrape": cmd_scrape, "scrape_hw": cmd_scrape_hw,
     "scrape_notices": cmd_scrape_notices, "scrape_reports": cmd_scrape_reports,
+    "serve": cmd_serve,
     "export": cmd_export, "ics": cmd_ics, "show": cmd_show,
 }
 
