@@ -25,7 +25,7 @@ The server stores **no Engage credentials**. You log in with your own school acc
 ```bash
 curl -X POST http://localhost:8000/auth/login \
   -H "Content-Type: application/json" \
-  -d '{"username": "your.name", "password": "yourpassword", "security_code": ""}'
+  -d '{"username": "your.name", "password": "yourpassword"}'
 ```
 
 ```json
@@ -53,7 +53,7 @@ When a token expires the API returns:
 {"detail": "Session expired — call POST /auth/login again"}
 ```
 
-Just call `/auth/login` again to get a fresh token. The Discord bot handles this automatically.
+Just call `/auth/login` again to get a fresh token. The Discord bot handles this automatically — each Discord user has their own token, refreshed transparently when it expires.
 
 ---
 
@@ -83,12 +83,12 @@ Exchange Engage credentials for a Bearer token.
 |---|---|---|---|
 | `username` | string | Yes | Engage portal username |
 | `password` | string | Yes | Engage portal password |
-| `security_code` | string | No | MFA/security code if your portal requires it |
+| `security_code` | string | No | MFA/security code — omit or pass `""` if not used |
 
 ```bash
 curl -X POST http://localhost:8000/auth/login \
   -H "Content-Type: application/json" \
-  -d '{"username": "john.doe", "password": "secret", "security_code": ""}'
+  -d '{"username": "john.doe", "password": "secret"}'
 ```
 
 ```json
@@ -278,7 +278,7 @@ The `html` field is the portal's rendered output. The Discord bot strips tags fo
 
 ## Privacy reference
 
-All endpoints require a Bearer token, so access is already controlled by who has valid credentials. On top of that:
+All endpoints require a Bearer token tied to a specific Engage account, so each user only ever sees their own data. The Discord bot maps each Discord user to their own token — users link their account once with `/login`. On top of that:
 
 | Endpoint | Discord usage |
 |---|---|
@@ -317,6 +317,7 @@ async def get_token(username: str, password: str) -> str:
     async with httpx.AsyncClient() as c:
         r = await c.post(f"{BASE}/auth/login",
                          json={"username": username, "password": password})
+        # security_code can be added to the dict above if your portal requires it
         r.raise_for_status()
         return r.json()["token"]
 
